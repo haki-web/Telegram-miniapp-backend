@@ -46,39 +46,6 @@ db = firestore.client()
 async def root():
     return {"status": "ok", "message": "Firebase FastAPI Backend Running!"}
 
-@app.post("/add_points")
-async def add_points(data: dict):
-    try:
-        user_id = data.get("user_id")
-        amount = int(data.get("amount", 0))
-        
-        if not user_id or amount <= 0:
-            return {"status": "error", "message": "Invalid user_id or amount"}
-        
-        ref = db.collection("users").document(user_id)
-        
-        # Atomic update (prevents race conditions)
-        @firestore.transactional
-        def update_in_transaction(transaction, ref, amount):
-            doc = ref.get(transaction=transaction)
-            current_points = doc.get("points", 0) if doc.exists else 0
-            transaction.update(ref, {"points": current_points + amount})
-        
-        transaction = db.transaction()
-        update_in_transaction(transaction, ref, amount)
-        
-        return {"status": "ok", "points_added": amount}
-    
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-        
-@app.get("/points/{user_id}")
-async def get_points(user_id: str):
-    ref = db.collection("users").document(user_id).get()
-    if ref.exists:
-        return {"points": ref.to_dict().get("points", 0)}
-    return {"points": 0}
-
 @app.get("/leaderboard")
 async def leaderboard(limit: int = 20):
     try:
@@ -109,49 +76,63 @@ async def leaderboard(limit: int = 20):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.post("/referral")
-async def referral(data: dict):
+@app.post("/add_points")
+async def add_points(request: PointsRequest):
     try:
-        user_id = data.get("user_id")        
-        referral_id = data.get("referral_id")  
-
-        if not user_id or not referral_id or user_id == referral_id:
-            return {"status": "error", "message": "Invalid referral"}
-
-        referrer_ref = db.collection("users").document(user_id)
-        referral_ref = db.collection("users").document(referral_id)
-
-        @firestore.transactional
-        def process_referral(transaction, referrer_ref, referral_ref):
-            # Prevent duplicate referrals
-            referral_doc = referral_ref.get(transaction=transaction)
-            if referral_doc.exists and referral_doc.get("referred_by"):
-                return False
-            
-            # Update referrer's points + count
-            referrer_doc = referrer_ref.get(transaction=transaction)
-            current_ref_count = referrer_doc.get("referral_count", 0) if referrer_doc.exists else 0
-            current_points = referrer_doc.get("points", 0) if referrer_doc.exists else 0
-            
-            transaction.update(referral_ref, {
-                "referred_by": user_id,
-                "referral_timestamp": firestore.SERVER_TIMESTAMP
-            })
-            
-            transaction.update(referrer_ref, {
-                "referral_count": current_ref_count + 1,
-                "points": current_points + 100  # 100 points per referral
-            })
-            
-            return True
-
-        transaction = db.transaction()
-        success = process_referral(transaction, referrer_ref, referral_ref)
+        user_id = request.user_id
+        amount = request.amount
         
-        if not success:
-            return {"status": "ok", "message": "Referral already counted"}
-            
-        return {"status": "ok", "message": f"Referral reward given to {user_id}"}
+        if amount <= 0:
+            return {"status": "error", "message": "Amount must be positive"}
+        
+        user_ref = db.collection("users").document(user_id)
+        
+        # Using firestore.Increment for atomic updates
+        await user_ref.set({
+            "points": firestore.Increment(amount),
+            "last_updated": firestore.SERVER_TIMESTAMP
+        }, merge=True)
+        
+        return {"status": "ok", "points_added": amount}
     
     except Exception as e:
+        logger.error(f"Error adding points: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/referral")
+async def referral(request: ReferralRequest):
+    try:
+        user_id = request.user_id
+        referral_id = request.referral_id
+
+        if user_id == referral_id:
+            return {"status": "error", "message": "Cannot refer yourself"}
+        
+        referrer_ref = db.collection("users").document(user_id)
+        referral_ref = db.collection("users").document(referral_id)
+        
+        # Check if referral already exists
+        referral_doc = await referral_ref.get()
+        if referral_doc.exists and referral_doc.get("referred_by"):
+            return {"status": "error", "message": "Already referred"}
+        
+        # Batch write for atomic operation
+        batch = db.batch()
+        batch.set(referral_ref, {
+            "referred_by": user_id,
+            "referral_timestamp": firestore.SERVER_TIMESTAMP
+        }, merge=True)
+        
+        batch.update(referrer_ref, {
+            "points": firestore.Increment(100),
+            "referral_count": firestore.Increment(1),
+            "last_updated": firestore.SERVER_TIMESTAMP
+        })
+        
+        await batch.commit()
+        
+        return {"status": "ok", "message": "Referral recorded", "reward": 100}
+    
+    except Exception as e:
+        logger.error(f"Referral error: {str(e)}")
         return {"status": "error", "message": str(e)}
