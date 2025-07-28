@@ -1,53 +1,85 @@
-import json
-import os
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import firebase_admin
 from firebase_admin import credentials, firestore
+import os
 
-def get_app():
-    if not firebase_admin._apps:
-        cred = credentials.Certificate({
-            "type": os.environ.get("FB_TYPE"),
-            "project_id": os.environ.get("FB_PROJECT_ID"),
-            "private_key_id": os.environ.get("FB_PRIVATE_KEY_ID"),
-            "private_key": os.environ.get("FB_PRIVATE_KEY").replace("\\n", "\n"),
-            "client_email": os.environ.get("FB_CLIENT_EMAIL"),
-            "client_id": os.environ.get("FB_CLIENT_ID"),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": os.environ.get("FB_CLIENT_CERT_URL")
-        })
-        firebase_admin.initialize_app(cred)
+app = FastAPI()
 
-get_app()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate({
+        "type": "service_account",
+        "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+        "private_key": os.getenv("FIREBASE_PRIVATE_KEY").replace("\\n", "\n"),
+        "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+        "token_uri": "https://oauth2.googleapis.com/token"
+    })
+    firebase_admin.initialize_app(cred)
+    print("✅ Firebase connected!")
+
 db = firestore.client()
 
-def handler(request, *args, **kwargs):
-    try:
-        if request.method != 'POST':
-            return json_response({ "message": "Only POST allowed." }, 405)
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Firebase FastAPI Backend Running!"}
 
-        body = request.json
-        user_id = str(body.get("id"))
-        name = body.get("name")
-        username = body.get("username")
+@app.post("/add_points")
+async def add_points(data: dict):
+    user_id = data.get("user_id")
+    amount = data.get("amount", 0)
+    ref = db.collection("users").document(user_id)
+    doc = ref.get()
 
-        if not user_id:
-            return json_response({ "error": "Missing user ID" }, 400)
+    if doc.exists:
+        current_points = doc.to_dict().get("points", 0)
+        ref.update({"points": current_points + amount})
+    else:
+        ref.set({"points": amount})
 
-        db.collection("users").document(user_id).set({
-            "name": name,
-            "username": username
-        }, merge=True)
+    return {"status": "ok", "points_added": amount}
 
-        return json_response({ "message": f"Saved {name}" })
-    
-    except Exception as e:
-        return json_response({ "error": str(e) }, 500)
+@app.get("/points/{user_id}")
+async def get_points(user_id: str):
+    ref = db.collection("users").document(user_id).get()
+    if ref.exists:
+        return {"points": ref.to_dict().get("points", 0)}
+    return {"points": 0}
 
-def json_response(data, status=200):
-    return {
-        "statusCode": status,
-        "headers": { "Content-Type": "application/json" },
-        "body": json.dumps(data)
-    }
+@app.get("/leaderboard")
+async def leaderboard():
+    users = db.collection("users").order_by("points", direction=firestore.Query.DESCENDING).limit(20).stream()
+    data = [{"user_id": u.id, "points": u.to_dict().get("points", 0)} for u in users]
+    return data
+
+@app.post("/referral")
+async def referral(data: dict):
+    user_id = data.get("user_id")        
+    referral_id = data.get("referral_id")  
+
+    if not user_id or not referral_id or user_id == referral_id:
+        return {"status": "error", "message": "Invalid referral"}
+
+    ref = db.collection("users").document(referral_id).get()
+
+    if not ref.exists: 
+        db.collection("users").document(referral_id).set({"points": 0, "referred_by": user_id})
+
+        referrer_ref = db.collection("users").document(user_id)
+        doc = referrer_ref.get()
+        if doc.exists:
+            current_points = doc.to_dict().get("points", 0)
+            referrer_ref.update({"points": current_points + 100}) 
+        else:
+            referrer_ref.set({"points": 100})
+
+        return {"status": "ok", "message": f"Referral reward given to {user_id}"}
+
+    return {"status": "ok", "message": "Referral already counted"}
