@@ -92,11 +92,15 @@ async def add_points(request: PointsRequest):
         
         user_ref = db.collection("users").document(user_id)
         
-        # FIX: Remove await from get()
-        user_doc = user_ref.get()  # This is synchronous in Firestore Admin SDK
-        current_points = user_doc.get("points", 0) if user_doc.exists else 0
+        # Get user document (synchronous operation)
+        user_doc = user_ref.get()
         
-        # Update points (this part is correctly async)
+        # Get points with default value if field doesn't exist
+        current_points = 0
+        if user_doc.exists:
+            current_points = user_doc.get("points", 0)  # Correct usage with 2 args
+        
+        # Update points (async operation)
         await user_ref.set({
             "points": firestore.Increment(amount),
             "last_updated": firestore.SERVER_TIMESTAMP,
