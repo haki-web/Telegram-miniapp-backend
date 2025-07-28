@@ -92,15 +92,14 @@ async def add_points(request: PointsRequest):
         
         user_ref = db.collection("users").document(user_id)
         
-        # Get current points first to return complete info
-        user_doc = await user_ref.get()
+        # FIX: Remove await from get()
+        user_doc = user_ref.get()  # This is synchronous in Firestore Admin SDK
         current_points = user_doc.get("points", 0) if user_doc.exists else 0
         
-        # Update points
+        # Update points (this part is correctly async)
         await user_ref.set({
             "points": firestore.Increment(amount),
             "last_updated": firestore.SERVER_TIMESTAMP,
-            # Ensure username exists if this is a new user
             "username": user_doc.get("username", f"User-{user_id[:4]}")
         }, merge=True)
         
@@ -114,7 +113,7 @@ async def add_points(request: PointsRequest):
     except Exception as e:
         logger.error(f"Error adding points: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 @app.post("/referral")
 async def referral(request: ReferralRequest):
     try:
