@@ -49,7 +49,6 @@ async def root():
 @app.get("/leaderboard")
 async def leaderboard(limit: int = 20):
     try:
-        # Only show users with points > 0
         users_ref = db.collection("users")
         query = users_ref.where("points", ">", 0)\
                        .order_by("points", direction=firestore.Query.DESCENDING)\
@@ -62,20 +61,26 @@ async def leaderboard(limit: int = 20):
             user_data = u.to_dict()
             data.append({
                 "user_id": u.id,
-                "username": user_data.get("username", "Anonymous"),  # Add username if available
+                "username": user_data.get("username", "Anonymous"),
                 "points": user_data.get("points", 0),
-                "referral_count": user_data.get("referral_count", 0)  # Track referrals
+                "referral_count": user_data.get("referral_count", 0)
             })
         
+        # Ensure we always return an array, even if empty
         return {
             "status": "ok",
             "count": len(data),
-            "leaderboard": data
+            "leaderboard": data or []  # Return empty array if no data
         }
     
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-
+        logger.error(f"Leaderboard error: {str(e)}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "leaderboard": []  # Frontend can handle empty state
+        }
+        
 @app.post("/add_points")
 async def add_points(request: PointsRequest):
     try:
@@ -83,22 +88,33 @@ async def add_points(request: PointsRequest):
         amount = request.amount
         
         if amount <= 0:
-            return {"status": "error", "message": "Amount must be positive"}
+            raise HTTPException(status_code=400, detail="Amount must be positive")
         
         user_ref = db.collection("users").document(user_id)
         
-        # Using firestore.Increment for atomic updates
+        # Get current points first to return complete info
+        user_doc = await user_ref.get()
+        current_points = user_doc.get("points", 0) if user_doc.exists else 0
+        
+        # Update points
         await user_ref.set({
             "points": firestore.Increment(amount),
-            "last_updated": firestore.SERVER_TIMESTAMP
+            "last_updated": firestore.SERVER_TIMESTAMP,
+            # Ensure username exists if this is a new user
+            "username": user_doc.get("username", f"User-{user_id[:4]}")
         }, merge=True)
         
-        return {"status": "ok", "points_added": amount}
+        return {
+            "status": "ok",
+            "points_added": amount,
+            "new_balance": current_points + amount,
+            "user_id": user_id
+        }
     
     except Exception as e:
         logger.error(f"Error adding points: {str(e)}")
-        return {"status": "error", "message": str(e)}
-
+        raise HTTPException(status_code=500, detail=str(e))
+        
 @app.post("/referral")
 async def referral(request: ReferralRequest):
     try:
