@@ -95,10 +95,11 @@ async def add_points(request: PointsRequest):
         # Get user document (synchronous operation)
         user_doc = user_ref.get()
         
-        # Get points with default value if field doesn't exist
+        # Get points safely
         current_points = 0
         if user_doc.exists:
-            current_points = user_doc.get("points", 0)  # Correct usage with 2 args
+            # CORRECT: Only 2 arguments - field name and default value
+            current_points = user_doc.get("points", 0)  
         
         # Update points (async operation)
         await user_ref.set({
@@ -117,7 +118,7 @@ async def add_points(request: PointsRequest):
     except Exception as e:
         logger.error(f"Error adding points: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 @app.post("/referral")
 async def referral(request: ReferralRequest):
     try:
