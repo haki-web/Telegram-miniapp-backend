@@ -61,42 +61,31 @@ async def leaderboard():
 
 @app.post("/referral")
 async def referral(data: dict):
-    user_id = data.get("user_id")          # New user ID
-    referral_id = data.get("referral_id")  # Referrer ID
+    user_id = data.get("user_id")        
+    referral_id = data.get("referral_id")  
 
     if not user_id or not referral_id or user_id == referral_id:
         return {"status": "error", "message": "Invalid referral"}
 
-    user_ref = db.collection("users").document(user_id)
-    user_doc = user_ref.get()
+    referral_user_ref = db.collection("users").document(referral_id)
+    referral_doc = referral_user_ref.get()
 
-    if user_doc.exists:
-        return {"status": "ok", "message": "User already registered"}
-
-    # Save new user with referrer
-    user_ref.set({
-        "points": 0,
-        "referred_by": referral_id,
-        "joined": firestore.SERVER_TIMESTAMP
-    })
-
-    # Reward referrer
-    referrer_ref = db.collection("users").document(referral_id)
-    referrer_doc = referrer_ref.get()
-
-    if referrer_doc.exists:
-        data = referrer_doc.to_dict()
-        current_points = data.get("points", 0)
-        current_ref_count = data.get("refCount", 0)
-
-        referrer_ref.update({
-            "points": current_points + 100,
-            "refCount": current_ref_count + 1
-        })
+    if referral_doc.exists:
+        if referral_doc.to_dict().get("referred_by"):
+            return {"status": "ok", "message": "Referral already counted"}
     else:
-        referrer_ref.set({
-            "points": 100,
-            "refCount": 1
-        })
+        referral_user_ref.set({})  # Create empty if doesn't exist
 
-    return {"status": "ok", "message": f"Referral reward given to {referral_id}"}
+    # Set referred_by field
+    referral_user_ref.update({"referred_by": user_id})
+
+    # Add points to referrer
+    referrer_ref = db.collection("users").document(user_id)
+    doc = referrer_ref.get()
+    if doc.exists:
+        current_points = doc.to_dict().get("points", 0)
+        referrer_ref.update({"points": current_points + 100}) 
+    else:
+        referrer_ref.set({"points": 100})
+
+    return {"status": "ok", "message": f"Referral reward given to {user_id}"}
