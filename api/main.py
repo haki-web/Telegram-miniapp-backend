@@ -47,6 +47,24 @@ db = firestore.client()
 async def root():
     return {"status": "ok", "message": "Firebase FastAPI Backend Running!"}
 
+@app.get("/points/{user_id}")
+async def get_points(user_id: str):
+    try:
+        doc_ref = db.collection("users").document(user_id)
+        doc = await asyncio.to_thread(doc_ref.get)
+
+        if doc.exists:
+            return {
+                "status": "ok",
+                "points": doc.get("points", 0),
+                "referral_count": doc.get("referral_count", 0)
+            }
+        else:
+            return {"status": "ok", "points": 0, "referral_count": 0}
+    except Exception as e:
+        logger.exception("Error fetching points")
+        return {"status": "error", "message": "Failed to fetch points"}
+        
 @app.get("/leaderboard")
 async def leaderboard(limit: int = 20):
     try:
