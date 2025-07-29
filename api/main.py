@@ -66,11 +66,10 @@ async def leaderboard(limit: int = 20):
                 "referral_count": user_data.get("referral_count", 0)
             })
         
-        # Ensure we always return an array, even if empty
         return {
             "status": "ok",
             "count": len(data),
-            "leaderboard": data or []  # Return empty array if no data
+            "leaderboard": data or []
         }
     
     except Exception as e:
@@ -78,7 +77,7 @@ async def leaderboard(limit: int = 20):
         return {
             "status": "error",
             "message": str(e),
-            "leaderboard": []  # Frontend can handle empty state
+            "leaderboard": []
         }
         
 @app.post("/add_points")
@@ -92,26 +91,27 @@ async def add_points(request: PointsRequest):
         
         user_ref = db.collection("users").document(user_id)
         
-        # Get user document (synchronous operation)
-        user_doc = user_ref.get()
+        # Use transaction to ensure atomic update
+        @firestore.transactional
+        def update_points(transaction, user_ref, amount):
+            snapshot = user_ref.get(transaction=transaction)
+            current_points = snapshot.get("points", 0) if snapshot.exists else 0
+            new_points = current_points + amount
+            
+            transaction.update(user_ref, {
+                "points": new_points,
+                "last_updated": firestore.SERVER_TIMESTAMP
+            })
+            
+            return new_points
         
-        # Get points safely
-        current_points = 0
-        if user_doc.exists:
-            # CORRECT: Only 2 arguments - field name and default value
-            current_points = user_doc.get("points", 0)  
-        
-        # Update points (async operation)
-        await user_ref.set({
-            "points": firestore.Increment(amount),
-            "last_updated": firestore.SERVER_TIMESTAMP,
-            "username": user_doc.get("username", f"User-{user_id[:4]}")
-        }, merge=True)
+        transaction = db.transaction()
+        new_balance = update_points(transaction, user_ref, amount)
         
         return {
             "status": "ok",
             "points_added": amount,
-            "new_balance": current_points + amount,
+            "new_balance": new_balance,
             "user_id": user_id
         }
     
@@ -131,27 +131,40 @@ async def referral(request: ReferralRequest):
         referrer_ref = db.collection("users").document(user_id)
         referral_ref = db.collection("users").document(referral_id)
         
-        # Check if referral already exists
-        referral_doc = await referral_ref.get()
-        if referral_doc.exists and referral_doc.get("referred_by"):
-            return {"status": "error", "message": "Already referred"}
+        # Use transaction to ensure atomic operation
+        @firestore.transactional
+        def process_referral(transaction, referrer_ref, referral_ref):
+            # Check if referral exists and has already been referred
+            referral_snap = referral_ref.get(transaction=transaction)
+            if referral_snap.exists and referral_snap.get("referred_by"):
+                return False, "Already referred"
+            
+            # Update referral document
+            transaction.set(referral_ref, {
+                "referred_by": user_id,
+                "referral_timestamp": firestore.SERVER_TIMESTAMP
+            }, merge=True)
+            
+            # Update referrer's points and count
+            referrer_snap = referrer_ref.get(transaction=transaction)
+            current_points = referrer_snap.get("points", 0) if referrer_snap.exists else 0
+            current_count = referrer_snap.get("referral_count", 0) if referrer_snap.exists else 0
+            
+            transaction.update(referrer_ref, {
+                "points": current_points + 100,
+                "referral_count": current_count + 1,
+                "last_updated": firestore.SERVER_TIMESTAMP
+            })
+            
+            return True, "Referral recorded"
         
-        # Batch write for atomic operation
-        batch = db.batch()
-        batch.set(referral_ref, {
-            "referred_by": user_id,
-            "referral_timestamp": firestore.SERVER_TIMESTAMP
-        }, merge=True)
+        transaction = db.transaction()
+        success, message = process_referral(transaction, referrer_ref, referral_ref)
         
-        batch.update(referrer_ref, {
-            "points": firestore.Increment(100),
-            "referral_count": firestore.Increment(1),
-            "last_updated": firestore.SERVER_TIMESTAMP
-        })
-        
-        await batch.commit()
-        
-        return {"status": "ok", "message": "Referral recorded", "reward": 100}
+        if not success:
+            return {"status": "error", "message": message}
+            
+        return {"status": "ok", "message": message, "reward": 100}
     
     except Exception as e:
         logger.error(f"Referral error: {str(e)}")
